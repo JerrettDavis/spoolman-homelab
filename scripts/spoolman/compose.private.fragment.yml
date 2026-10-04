@@ -1,0 +1,94 @@
+services:
+  spoolman-db:
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    restart: always
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: spoolman_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/spoolman_admin_password
+    secrets:
+      - spoolman_admin_password
+      - spoolman_db_password
+    volumes:
+      - spoolman-db-data:/var/lib/postgresql/data
+      - /home/jd/spoolman-deploy/init-spoolman-db.sh:/docker-entrypoint-initdb.d/10-spoolman-db.sh:ro
+    networks:
+      - spoolman-private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spoolman_admin -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    mem_limit: 512m
+
+  spoolman:
+    image: ghcr.io/donkie/spoolman:0.27.0@sha256:7aba565eff774c6dda212d4204de8fa30bf68d513127ef875cc7ef3197a4664e
+    restart: always
+    depends_on:
+      spoolman-db:
+        condition: service_healthy
+    environment:
+      TZ: America/Chicago
+      SPOOLMAN_DB_TYPE: postgres
+      SPOOLMAN_DB_HOST: spoolman-db
+      SPOOLMAN_DB_PORT: "5432"
+      SPOOLMAN_DB_NAME: spoolman
+      SPOOLMAN_DB_USERNAME: spoolman
+      SPOOLMAN_DB_PASSWORD_FILE: /run/secrets/spoolman_db_password
+      SPOOLMAN_ALLOWED_HOSTS: spoolman.jerrettdavis.com
+      SPOOLMAN_DEBUG_MODE: "FALSE"
+      SPOOLMAN_LOGGING_LEVEL: INFO
+    secrets:
+      - spoolman_db_password
+    volumes:
+      - spoolman-data:/home/app/.local/share/spoolman
+    networks:
+      - spoolman-private
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik
+      traefik.http.routers.spoolman.rule: "Host(`spoolman.jerrettdavis.com`)"
+      traefik.http.routers.spoolman.entrypoints: websecure
+      traefik.http.routers.spoolman.tls.certresolver: cloudflare
+      traefik.http.routers.spoolman.middlewares: spoolman-authentik@docker
+      traefik.http.services.spoolman.loadbalancer.server.port: "8000"
+      traefik.http.middlewares.spoolman-authentik.forwardauth.address: "http://authentik-server-1:9000/outpost.goauthentik.io/auth/traefik"
+      traefik.http.middlewares.spoolman-authentik.forwardauth.trustForwardHeader: "true"
+      traefik.http.middlewares.spoolman-authentik.forwardauth.authResponseHeaders: "X-authentik-username,X-authentik-groups,X-authentik-email,X-authentik-name,X-authentik-uid,X-authentik-jwt,X-authentik-meta-jwks,X-authentik-meta-outpost,X-authentik-meta-provider,X-authentik-meta-app,X-authentik-meta-version"
+      traefik.http.routers.spoolman-ha.rule: "Host(`spoolman-ha.jerrettdavis.com`)"
+      traefik.http.routers.spoolman-ha.entrypoints: spoolmanha
+      traefik.http.routers.spoolman-ha.tls.certresolver: cloudflare
+      traefik.http.routers.spoolman-ha.middlewares: spoolman-ha-allow@docker,spoolman-ha-host@docker
+      traefik.http.routers.spoolman-ha.service: spoolman
+      traefik.http.middlewares.spoolman-ha-allow.ipwhitelist.sourcerange: "10.0.107.46/32,10.0.0.160/32"
+      traefik.http.middlewares.spoolman-ha-host.headers.customrequestheaders.Host: spoolman.jerrettdavis.com
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          r=urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/api/v1/health',headers={'Host':'spoolman.jerrettdavis.com'}),timeout=3);
+          raise SystemExit(0 if r.status == 200 else 1)
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    mem_limit: 1g
+
+networks:
+  spoolman-private:
+    internal: true
+
+volumes:
+  spoolman-db-data:
+  spoolman-data:
+
+secrets:
+  spoolman_admin_password:
+    file: /home/jd/.docker-secrets/spoolman/spoolman_admin_password
+  spoolman_db_password:
+    file: /home/jd/.docker-secrets/spoolman/spoolman_db_password
